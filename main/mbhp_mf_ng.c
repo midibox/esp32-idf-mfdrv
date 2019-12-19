@@ -241,21 +241,32 @@ static int32_t sysex_patch_write(uint8_t address, uint8_t value)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // This callback is called whenever a new MIDI message is received
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-static void callback_midi_message_received(uint8_t blemidi_port, uint16_t timestamp, uint8_t midi_status, uint8_t *remaining_message, size_t len)
+static void callback_midi_message_received(uint8_t blemidi_port, uint16_t timestamp, uint8_t midi_status, uint8_t *remaining_message, size_t len, size_t continued_sysex_pos)
 {
-  ESP_LOGI(BLEMIDI_TAG, "CALLBACK blemidi_port=%d, timestamp=%d, midi_status=0x%02x, len=%d, remaining_message:", blemidi_port, timestamp, midi_status, len);
+  static uint8_t expect_continued_sysex = 0;
+  
+  ESP_LOGI(BLEMIDI_TAG, "CALLBACK blemidi_port=%d, timestamp=%d, midi_status=0x%02x, len=%d, continued_sysex_pos=%d, remaining_message:", blemidi_port, timestamp, midi_status, len, continued_sysex_pos);
   esp_log_buffer_hex(BLEMIDI_TAG, remaining_message, len);
 
   // SysEx communication
   uint8_t *sysex_stream = remaining_message;
-  if( midi_status == 0xf0 && len >= 6 &&
-      *(sysex_stream++) == 0x00 &&
-      *(sysex_stream++) == 0x00 &&
-      *(sysex_stream++) == 0x7e &&
-      *(sysex_stream++) == 0x4f && // MBHP_MF_NG
-      *(sysex_stream++) == sysex_device_id ) {
+  if( midi_status == 0xf0 &&
+      (continued_sysex_pos ||
+       (len >= 6 &&
+	*(sysex_stream++) == 0x00 &&
+	*(sysex_stream++) == 0x00 &&
+	*(sysex_stream++) == 0x7e &&
+	*(sysex_stream++) == 0x4f && // MBHP_MF_NG
+	*(sysex_stream++) == sysex_device_id))
+      ) {
 
-    switch( *(sysex_stream++) ) {
+    if( continued_sysex_pos && !expect_continued_sysex ) {
+      return; // seems that this was continued sysex data for something else...
+    }
+    expect_continued_sysex = 0; // has to be set explicitely again if required
+    
+    uint8_t cmd = continued_sysex_pos ? 0x2 : *(sysex_stream++);
+    switch( cmd ) {
     case 0x1: { // Patch Read
       int i;
       uint8_t patch_number = *(sysex_stream++); // TODO: handle patch number
@@ -276,17 +287,48 @@ static void callback_midi_message_received(uint8_t blemidi_port, uint16_t timest
     } break;
 	
     case 0x2: { // Patch Write
-      int i;
-      uint8_t patch_number = *(sysex_stream++); // TODO: handle patch number
+      // this is the only command which could be continued over multiple packets!
+      static uint8_t patch_number = 0;
+      static uint8_t checksum = 0x00;
 
-      uint8_t checksum = 0;
+      int start_pos;
+      if( !continued_sysex_pos ) {
+	patch_number = *(sysex_stream++); // TODO: handle patch number
+	checksum = 0;
+	start_pos = 0;
+      } else {
+	start_pos = continued_sysex_pos - 7;
+      }
+      
       uint8_t *checksum_scan_ptr = sysex_stream;
-      for(i=0; i<2*sizeof(patch_t); ++i) {
+      int i;
+      for(i=start_pos; i<2*sizeof(patch_t); ++i) {
+	// transfer value to patch structure
+	if( (i % 2) == 0 ) {
+	  patch.ALL[i/2] &= 0xf0;
+	  patch.ALL[i/2] |= *checksum_scan_ptr & 0x0f;
+	} else {
+	  patch.ALL[i/2] &= 0x0f;
+	  patch.ALL[i/2] |= (*checksum_scan_ptr & 0x0f) << 4;
+	}
+	
 	checksum += *(checksum_scan_ptr++);
+
+	if( checksum_scan_ptr == (remaining_message+len) ) {
+	  expect_continued_sysex = 1;
+	  return; // expecting additional packets
+	}
       }
       uint8_t expected_checksum = (0x80 - checksum) & 0x7f;
-      //printf("Checksums: expected 0x%02x got 0x%02x\n", expected_checksum, *checksum_scan_ptr);
 
+      if( expected_checksum == *checksum_scan_ptr ) {
+	// if checksum matching: transfer patch structure to MFDRV
+	int i;
+	for(i=0; i<sizeof(patch_t); ++i) {
+	  sysex_patch_write(i, patch.ALL[i]);
+	}
+      }
+      
       uint8_t response[2] = {(expected_checksum == *checksum_scan_ptr) ? 0xf : 0xe, expected_checksum};
       sysex_send_dump(response, 2, -1); // Ack or Error Response
     } break;
@@ -346,7 +388,7 @@ static void callback_midi_message_received(uint8_t blemidi_port, uint16_t timest
 	MFDRV_TouchDetectionReset(mf);
 	MFDRV_FaderMove(mf, pos << 2); // convert to MBHP_MF_NG resolution
       }
-	
+
       {
 	uint8_t response[2] = {0xf, 0x00};
 	sysex_send_dump(response, 2, -1); // Ack
