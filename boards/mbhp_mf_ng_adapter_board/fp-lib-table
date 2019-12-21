@@ -1,0 +1,3 @@
+(fp_lib_table
+  (lib (name mbhp_mf_special_parts)(type KiCad)(uri ${KIPRJMOD}/../mbhp_mf_special_parts.pretty)(options "")(descr ""))
+)
