@@ -530,84 +530,28 @@ Text Label 4450 4150 0    50   ~ 0
 SPI_MISO_ADC
 Text Label 4450 4050 0    50   ~ 0
 SPI_MISO_DINSR
-Wire Wire Line
-	7550 3150 7550 3500
-Wire Wire Line
-	7500 3150 7550 3150
-Wire Wire Line
-	7600 3100 7600 3400
-Wire Wire Line
-	7000 3100 7600 3100
-Wire Wire Line
-	7000 3150 7000 3100
-Wire Wire Line
-	7650 3050 7650 3300
-Wire Wire Line
-	7500 3050 7650 3050
-Wire Wire Line
-	7700 3000 7700 3200
-Wire Wire Line
-	7000 3000 7700 3000
-Wire Wire Line
-	7000 3050 7000 3000
-Wire Wire Line
-	7750 2950 7750 3100
-Wire Wire Line
-	7500 2950 7750 2950
-Wire Wire Line
-	7800 2900 7800 3000
-Wire Wire Line
-	7000 2900 7800 2900
-Wire Wire Line
-	7000 2950 7000 2900
-Wire Wire Line
-	7500 2850 7850 2850
-Wire Wire Line
-	7000 2800 7000 2850
 $Comp
 L Connector_Generic:Conn_02x05_Odd_Even J1
 U 1 1 5E140616
-P 7200 2950
-F 0 "J1" H 7250 3367 50  0000 C CNN
-F 1 "Analog Inputs" H 7250 3276 50  0000 C CNN
-F 2 "Connector_IDC:IDC-Header_2x05_P2.54mm_Vertical" H 7200 2950 50  0001 C CNN
-F 3 "~" H 7200 2950 50  0001 C CNN
-	1    7200 2950
-	1    0    0    -1  
+P 7300 3100
+F 0 "J1" H 7350 3517 50  0000 C CNN
+F 1 "Analog Inputs" H 7350 3426 50  0000 C CNN
+F 2 "Connector_IDC:IDC-Header_2x05_P2.54mm_Vertical" H 7300 3100 50  0001 C CNN
+F 3 "~" H 7300 3100 50  0001 C CNN
+	1    7300 3100
+	-1   0    0    1   
 $EndComp
 $Comp
 L power:GNDA #PWR01
 U 1 1 5E142455
-P 6950 2750
-F 0 "#PWR01" H 6950 2500 50  0001 C CNN
-F 1 "GNDA" V 6955 2623 50  0000 R CNN
-F 2 "" H 6950 2750 50  0001 C CNN
-F 3 "" H 6950 2750 50  0001 C CNN
-	1    6950 2750
-	0    1    1    0   
+P 7550 3400
+F 0 "#PWR01" H 7550 3150 50  0001 C CNN
+F 1 "GNDA" V 7555 3273 50  0000 R CNN
+F 2 "" H 7550 3400 50  0001 C CNN
+F 3 "" H 7550 3400 50  0001 C CNN
+	1    7550 3400
+	1    0    0    -1  
 $EndComp
-Wire Wire Line
-	6950 2750 7000 2750
-Wire Wire Line
-	7500 2750 7550 2750
-Wire Wire Line
-	7000 2800 7900 2800
-Wire Wire Line
-	7850 2850 7850 2900
-Wire Wire Line
-	7850 2900 7900 2900
-Wire Wire Line
-	7800 3000 7900 3000
-Wire Wire Line
-	7750 3100 7900 3100
-Wire Wire Line
-	7700 3200 7900 3200
-Wire Wire Line
-	7650 3300 7900 3300
-Wire Wire Line
-	7600 3400 7900 3400
-Wire Wire Line
-	7550 3500 7900 3500
 Text GLabel 5250 4750 2    50   Input ~ 0
 MIDI_TX
 Text GLabel 5250 4850 2    50   Input ~ 0
@@ -652,11 +596,65 @@ Wire Wire Line
 	6150 5850 6250 5850
 Wire Wire Line
 	8400 1550 8400 1650
-Wire Wire Line
-	7550 2750 7550 1650
-Wire Wire Line
-	7550 1650 8400 1650
 Connection ~ 8400 1650
 Wire Wire Line
 	8400 1650 8400 2000
+Wire Wire Line
+	7000 2900 7000 2800
+Wire Wire Line
+	7000 2800 7900 2800
+Wire Wire Line
+	7500 2900 7900 2900
+Wire Wire Line
+	7000 3000 7000 2950
+Wire Wire Line
+	7000 2950 7900 2950
+Wire Wire Line
+	7900 2950 7900 3000
+Wire Wire Line
+	7500 3000 7850 3000
+Wire Wire Line
+	7850 3000 7850 3100
+Wire Wire Line
+	7850 3100 7900 3100
+Wire Wire Line
+	7000 3100 7000 3050
+Wire Wire Line
+	7000 3050 7800 3050
+Wire Wire Line
+	7800 3050 7800 3200
+Wire Wire Line
+	7800 3200 7900 3200
+Wire Wire Line
+	7500 3100 7750 3100
+Wire Wire Line
+	7750 3100 7750 3300
+Wire Wire Line
+	7750 3300 7900 3300
+Wire Wire Line
+	7000 3200 7000 3150
+Wire Wire Line
+	7000 3150 7700 3150
+Wire Wire Line
+	7700 3150 7700 3400
+Wire Wire Line
+	7700 3400 7900 3400
+Wire Wire Line
+	7500 3200 7650 3200
+Wire Wire Line
+	7650 3200 7650 3500
+Wire Wire Line
+	7650 3500 7900 3500
+Wire Wire Line
+	7550 3400 7550 3300
+Wire Wire Line
+	7550 3300 7500 3300
+Wire Wire Line
+	7000 3300 6900 3300
+Wire Wire Line
+	6900 3300 6900 1650
+Wire Wire Line
+	6900 1650 8400 1650
+Text Notes 6950 2700 0    50   ~ 0
+Channel Pin Assignments\nare intentionally mirrored\nto simplify Layout.
 $EndSCHEMATC
