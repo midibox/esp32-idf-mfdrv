@@ -37,13 +37,24 @@
 #include "freertos/event_groups.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
 #include "soc/gpio_struct.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 
+#include "wifi.h"
+#include "console.h"
+#include "midi.h"
+
+#include "applemidi.h"
+#include "if/lwip/applemidi_if.h"
+
 #include "blemidi.h"
 #include "mfdrv.h"
+
+
+#define TAG "MIDIbox"
 
 
 // IO Pins for SPI connections
@@ -53,6 +64,7 @@
 #define PIN_NUM_CLK  18
 #define PIN_NUM_CS   5
 
+uint8_t midi_port_for_traces = 0x00;
 uint8_t sysex_device_id = 0;
 
 typedef union {
@@ -116,45 +128,6 @@ patch_t patch = { // currently only a single patch is supported
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// Sends a SysEx dump with device specific header
-////////////////////////////////////////////////////////////////////////////////////////////////////
-static int32_t sysex_send_dump(uint8_t *response, size_t response_len, int checksum_start)
-{
-    size_t packet_len = 2 + 6 + response_len + 2; // includes timestamp, MIDI status and remaining bytes
-    if( checksum_start >= 0 )
-      packet_len += 1; // + checksum
-    
-    uint8_t *packet = (uint8_t *)malloc(packet_len * sizeof(uint8_t));
-    packet[0] = blemidi_timestamp_high();
-    packet[1] = blemidi_timestamp_low();
-    packet[2] = 0xf0;
-    packet[3] = 0x00;
-    packet[4] = 0x00;
-    packet[5] = 0x7e;
-    packet[6] = 0x4f; // MBHP_MF_NG
-    packet[7] = sysex_device_id;
-    memcpy(&packet[8], response, response_len);
-    packet[packet_len-2] = blemidi_timestamp_high();
-    packet[packet_len-1] = 0xf7;
-
-    if( checksum_start >= 0 ) {
-      int i;
-      uint8_t checksum = 0x00;
-      
-      for(i=checksum_start; i<response_len-1; ++i) {
-	checksum += response[i];
-      }
-      packet[packet_len-3] = (0x80 - checksum) & 0x7f;
-    }
-    
-    blemidi_send_packet(0, packet, packet_len);
-
-    free(packet);
-
-    return 0; // no error
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
 // Writes into patch and transfers to application
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 static int32_t sysex_patch_write(uint8_t address, uint8_t value)
@@ -171,18 +144,18 @@ static int32_t sysex_patch_write(uint8_t address, uint8_t value)
     case 0x14: { // AIN Deadband
       int mf;
       for(mf=0; mf<MFDRV_NUM; ++mf) {
-	mfdrv_config_t cfg = MFDRV_ConfigGet(mf);
-	cfg.ain_deadband = value << 2; // 12bit -> 14bit to keep compatibility with MBHP_MF_NG
-	MFDRV_ConfigSet(mf, cfg);
+        mfdrv_config_t cfg = MFDRV_ConfigGet(mf);
+        cfg.ain_deadband = value << 2; // 12bit -> 14bit to keep compatibility with MBHP_MF_NG
+        MFDRV_ConfigSet(mf, cfg);
       }
     } break;
       
     case 0x15: { // MF Deadband
       int mf;
       for(mf=0; mf<MFDRV_NUM; ++mf) {
-	mfdrv_config_t cfg = MFDRV_ConfigGet(mf);
-	cfg.mf_deadband = value << 2; // 12bit -> 14bit to keep compatibility with MBHP_MF_NG
-	MFDRV_ConfigSet(mf, cfg);
+        mfdrv_config_t cfg = MFDRV_ConfigGet(mf);
+        cfg.mf_deadband = value << 2; // 12bit -> 14bit to keep compatibility with MBHP_MF_NG
+        MFDRV_ConfigSet(mf, cfg);
       }
     } break;
     }
@@ -241,23 +214,23 @@ static int32_t sysex_patch_write(uint8_t address, uint8_t value)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // This callback is called whenever a new MIDI message is received
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-static void callback_midi_message_received(uint8_t blemidi_port, uint16_t timestamp, uint8_t midi_status, uint8_t *remaining_message, size_t len, size_t continued_sysex_pos)
+static void callback_midi_message_received(uint8_t midi_port, uint16_t timestamp, uint8_t midi_status, uint8_t *remaining_message, size_t len, size_t continued_sysex_pos)
 {
   static uint8_t expect_continued_sysex = 0;
   
-  ESP_LOGI(BLEMIDI_TAG, "CALLBACK blemidi_port=%d, timestamp=%d, midi_status=0x%02x, len=%d, continued_sysex_pos=%d, remaining_message:", blemidi_port, timestamp, midi_status, len, continued_sysex_pos);
-  esp_log_buffer_hex(BLEMIDI_TAG, remaining_message, len);
+  ESP_LOGI(TAG, "CALLBACK midi_port=0x%02x, timestamp=%d, midi_status=0x%02x, len=%d, continued_sysex_pos=%d, remaining_message:", midi_port, timestamp, midi_status, len, continued_sysex_pos);
+  esp_log_buffer_hex(TAG, remaining_message, len);
 
   // SysEx communication
   uint8_t *sysex_stream = remaining_message;
   if( midi_status == 0xf0 &&
       (continued_sysex_pos ||
        (len >= 6 &&
-	*(sysex_stream++) == 0x00 &&
-	*(sysex_stream++) == 0x00 &&
-	*(sysex_stream++) == 0x7e &&
-	*(sysex_stream++) == 0x4f && // MBHP_MF_NG
-	*(sysex_stream++) == sysex_device_id))
+           *(sysex_stream++) == 0x00 &&
+           *(sysex_stream++) == 0x00 &&
+           *(sysex_stream++) == 0x7e &&
+           *(sysex_stream++) == 0x4f && // MBHP_MF_NG
+           *(sysex_stream++) == sysex_device_id))
       ) {
 
     if( continued_sysex_pos && !expect_continued_sysex ) {
@@ -279,11 +252,11 @@ static void callback_midi_message_received(uint8_t blemidi_port, uint16_t timest
       *(response_ptr++) = patch_number;
 
       for(i=0; i<sizeof(patch_t); ++i) {
-	*(response_ptr++) = patch.ALL[i] & 0xf;
-	*(response_ptr++) = patch.ALL[i] >> 4;
+        *(response_ptr++) = patch.ALL[i] & 0xf;
+        *(response_ptr++) = patch.ALL[i] >> 4;
       }
 
-      sysex_send_dump(response, response_len, 2);
+      midi_send_sysex_dump(midi_port, sysex_device_id, response, response_len, 2);
     } break;
 	
     case 0x2: { // Patch Write
@@ -293,44 +266,44 @@ static void callback_midi_message_received(uint8_t blemidi_port, uint16_t timest
 
       int start_pos;
       if( !continued_sysex_pos ) {
-	patch_number = *(sysex_stream++); // TODO: handle patch number
-	checksum = 0;
-	start_pos = 0;
+        patch_number = *(sysex_stream++); // TODO: handle patch number
+        checksum = 0;
+        start_pos = 0;
       } else {
-	start_pos = continued_sysex_pos - 7;
+        start_pos = continued_sysex_pos - 7;
       }
       
       uint8_t *checksum_scan_ptr = sysex_stream;
       int i;
       for(i=start_pos; i<2*sizeof(patch_t); ++i) {
-	// transfer value to patch structure
-	if( (i % 2) == 0 ) {
-	  patch.ALL[i/2] &= 0xf0;
-	  patch.ALL[i/2] |= *checksum_scan_ptr & 0x0f;
-	} else {
-	  patch.ALL[i/2] &= 0x0f;
-	  patch.ALL[i/2] |= (*checksum_scan_ptr & 0x0f) << 4;
-	}
+        // transfer value to patch structure
+        if( (i % 2) == 0 ) {
+          patch.ALL[i/2] &= 0xf0;
+          patch.ALL[i/2] |= *checksum_scan_ptr & 0x0f;
+        } else {
+          patch.ALL[i/2] &= 0x0f;
+          patch.ALL[i/2] |= (*checksum_scan_ptr & 0x0f) << 4;
+        }
 	
-	checksum += *(checksum_scan_ptr++);
+        checksum += *(checksum_scan_ptr++);
 
-	if( checksum_scan_ptr == (remaining_message+len) ) {
-	  expect_continued_sysex = 1;
-	  return; // expecting additional packets
-	}
+        if( checksum_scan_ptr == (remaining_message+len) ) {
+          expect_continued_sysex = 1;
+          return; // expecting additional packets
+        }
       }
       uint8_t expected_checksum = (0x80 - checksum) & 0x7f;
 
       if( expected_checksum == *checksum_scan_ptr ) {
-	// if checksum matching: transfer patch structure to MFDRV
-	int i;
-	for(i=0; i<sizeof(patch_t); ++i) {
-	  sysex_patch_write(i, patch.ALL[i]);
-	}
+        // if checksum matching: transfer patch structure to MFDRV
+        int i;
+        for(i=0; i<sizeof(patch_t); ++i) {
+          sysex_patch_write(i, patch.ALL[i]);
+        }
       }
       
       uint8_t response[2] = {(expected_checksum == *checksum_scan_ptr) ? 0xf : 0xe, expected_checksum};
-      sysex_send_dump(response, 2, -1); // Ack or Error Response
+      midi_send_sysex_dump(midi_port, sysex_device_id, response, 2, -1); // Ack or Error Response
     } break;
 	
     case 0x6: { // Parameter Write
@@ -340,18 +313,18 @@ static void callback_midi_message_received(uint8_t blemidi_port, uint16_t timest
       int num_bytes = (len-7) / 2;
       int i;
       for(i=0; i<num_bytes; ++i, ++address) {
-	uint8_t data = (*(sysex_stream++) & 0x0f);
-	data |= (*(sysex_stream++) & 0x0f) << 4;
-	//printf("%d: 0x%02x = 0x%02x\n", i, address, data);
+        uint8_t data = (*(sysex_stream++) & 0x0f);
+        data |= (*(sysex_stream++) & 0x0f) << 4;
+        //printf("%d: 0x%02x = 0x%02x\n", i, address, data);
 
-	if( address < sizeof(patch_t) ) {
-	  sysex_patch_write(address, data);
-	}
+        if( address < sizeof(patch_t) ) {
+          sysex_patch_write(address, data);
+        }
       }
 
       {
-	uint8_t response[2] = {0xf, 0x00};
-	sysex_send_dump(response, 2, -1); // Ack
+        uint8_t response[2] = {0xf, 0x00};
+        midi_send_sysex_dump(midi_port, sysex_device_id, response, 2, -1); // Ack
       }
     } break;
 	
@@ -359,19 +332,19 @@ static void callback_midi_message_received(uint8_t blemidi_port, uint16_t timest
       uint8_t first_fader = *(sysex_stream++);
 
       {
-	uint8_t response[2+16];
-	uint8_t *response_ptr = response;
-	*(response_ptr++) = 0x0a; // like "Faders Set"
-	*(response_ptr++) = first_fader;
+        uint8_t response[2+16];
+        uint8_t *response_ptr = response;
+        *(response_ptr++) = 0x0a; // like "Faders Set"
+        *(response_ptr++) = first_fader;
 
-	int i;
-	for(i=first_fader; i<8; ++i) {
-	  uint16_t pos = MFDRV_FaderPositionGet(i);
-	  *(response_ptr++) = pos & 0x7f;
-	  *(response_ptr++) = pos >> 7;
-	}
+        int i;
+        for(i=first_fader; i<8; ++i) {
+          uint16_t pos = MFDRV_FaderPositionGet(i);
+          *(response_ptr++) = pos & 0x7f;
+          *(response_ptr++) = pos >> 7;
+        }
 	  
-	sysex_send_dump(response, 2+2*(8-first_fader), -1); // Ack
+        midi_send_sysex_dump(midi_port, sysex_device_id, response, 2+2*(8-first_fader), -1); // Ack
       }
     } break;
 	
@@ -381,36 +354,37 @@ static void callback_midi_message_received(uint8_t blemidi_port, uint16_t timest
       int i;
       int num_faders = (len-7) / 2;
       for(i=0; i<num_faders; ++i) {
-	uint16_t pos = *(sysex_stream++);
-	pos |= ((uint16_t)*(sysex_stream++)) << 7;
+        uint16_t pos = *(sysex_stream++);
+        pos |= ((uint16_t)*(sysex_stream++)) << 7;
 
-	uint8_t mf = i + first_fader;
-	MFDRV_TouchDetectionReset(mf);
-	MFDRV_FaderMove(mf, pos << 2); // convert to MBHP_MF_NG resolution
+        uint8_t mf = i + first_fader;
+        MFDRV_TouchDetectionReset(mf);
+        MFDRV_FaderMove(mf, pos << 2); // convert to MBHP_MF_NG resolution
       }
 
       {
-	uint8_t response[2] = {0xf, 0x00};
-	sysex_send_dump(response, 2, -1); // Ack
+        uint8_t response[2] = {0xf, 0x00};
+        midi_send_sysex_dump(midi_port, sysex_device_id, response, 2, -1); // Ack
       }
     } break;
 	
     case 0xb: { // Trace Request
       uint8_t mf = *(sysex_stream++);
       uint8_t scale = *(sysex_stream++);
+      midi_port_for_traces = midi_port;
       MFDRV_TraceRequest(mf, scale);
     } break;
 	
     case 0xf: { // Ping
       // feedback detection: only send back if no additional byte has been received!
       if( len == 6 ) {
-	uint8_t response[2] = {0xf, 0x00};
-	sysex_send_dump(response, 2, -1); // Pong
+        uint8_t response[2] = {0xf, 0x00};
+        midi_send_sysex_dump(midi_port, sysex_device_id, response, 2, -1); // Pong
       }
     } break;
     default: { // Invalid Command
       uint8_t response[2] = {0xe, 0x00};
-      sysex_send_dump(response, 2, -1); // invalid command
+      midi_send_sysex_dump(midi_port, sysex_device_id, response, 2, -1); // invalid command
     }
     }
   }
@@ -427,6 +401,8 @@ static void callback_midi_message_received(uint8_t blemidi_port, uint16_t timest
     }
   }
 }
+
+
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -447,8 +423,8 @@ static void callback_manual_fader_change(uint32_t mf, uint16_t value)
     // 12bit -> 14bit value
     value <<= 2;
 
-    uint8_t packet[5] = {blemidi_timestamp_high(), blemidi_timestamp_low(), 0xe0 + mf, value & 0x7f, value >> 7 };
-    blemidi_send_packet(0, packet, 5);
+    midi_send_event3(midi_if_encode_port(MIDI_IF_BLE, 0), 0xe0 + mf, value & 0x7f, value >> 7);
+    midi_send_event3(midi_if_encode_port(MIDI_IF_APPLE, 1), 0xe0 + mf, value & 0x7f, value >> 7);
   }
 }
 
@@ -463,8 +439,8 @@ static void callback_touch_sensor_change(uint32_t ts, uint8_t value)
 
   if( patch.touch_sensor_mode >= 1 ) { // touch sensor will generate a MIDI event
     // TODO: make MIDI event optional depending on patch.operation_mode    
-    uint8_t packet[5] = {blemidi_timestamp_high(), blemidi_timestamp_low(), 0x90, 0x68 + ts, value ? 0x00 : 0x7f };
-    blemidi_send_packet(0, packet, 5);
+    midi_send_event3(midi_if_encode_port(MIDI_IF_BLE, 0), 0x90, 0x68 + ts, value ? 0x00 : 0x7f);
+    midi_send_event3(midi_if_encode_port(MIDI_IF_APPLE, 1), 0x90, 0x68 + ts, value ? 0x00 : 0x7f);
   }
 
   if( patch.touch_sensor_mode >= 2 ) { // touch sensor will suspend motor
@@ -606,7 +582,7 @@ static void task_mf(void *pvParameters)
     ////////////////////////////////////////////////////////////////////////////////////////////////
     blemidi_tick_ms(1);
 
-    
+
     ////////////////////////////////////////////////////////////////////////////////////////////////
     // ADC Conversions
     ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -642,19 +618,19 @@ static void task_mf(void *pvParameters)
       static unsigned ctr = 0;
 
       if( ++ctr == 100 ) {
-	ctr = 0;
+        ctr = 0;
 
-	uint32_t dummy;
-	spicommon_bus_free_io_cfg(&buscfg_adc);
-	spicommon_bus_initialize_io(VSPI_HOST, &buscfg_dinsr, 0, SPICOMMON_BUSFLAG_MASTER, &dummy);
-	spicommon_hw_for_host(VSPI_HOST)->pin.master_cs_pol |= (1 << 0);
+        uint32_t dummy;
+        spicommon_bus_free_io_cfg(&buscfg_adc);
+        spicommon_bus_initialize_io(VSPI_HOST, &buscfg_dinsr, 0, SPICOMMON_BUSFLAG_MASTER, &dummy);
+        spicommon_hw_for_host(VSPI_HOST)->pin.master_cs_pol |= (1 << 0);
  
-	ret = spi_device_transmit(spi_adc, &spi_transaction_dinsr[0]);
-	assert(ret==ESP_OK);
+        ret = spi_device_transmit(spi_adc, &spi_transaction_dinsr[0]);
+        assert(ret==ESP_OK);
 
-	spicommon_bus_free_io_cfg(&buscfg_dinsr);
-	spicommon_bus_initialize_io(VSPI_HOST, &buscfg_adc, 0, SPICOMMON_BUSFLAG_MASTER, &dummy);
-	spicommon_hw_for_host(VSPI_HOST)->pin.master_cs_pol &= ~(1 << 0);
+        spicommon_bus_free_io_cfg(&buscfg_dinsr);
+        spicommon_bus_initialize_io(VSPI_HOST, &buscfg_adc, 0, SPICOMMON_BUSFLAG_MASTER, &dummy);
+        spicommon_hw_for_host(VSPI_HOST)->pin.master_cs_pol &= ~(1 << 0);
       }
     }
 
@@ -670,23 +646,36 @@ static void task_mf(void *pvParameters)
     {
       uint16_t *trace = NULL;
       if( MFDRV_TraceAvailable(&trace) ) {
-	const size_t response_len = 1+512;
-	uint8_t response[response_len];
-	uint8_t *response_ptr = response;
+        const size_t response_len = 1+512;
+        uint8_t response[response_len];
+        uint8_t *response_ptr = response;
 	
-	*(response_ptr++) = 0x0c; // Trace dump
+        *(response_ptr++) = 0x0c; // Trace dump
 
-	for(i=0; i<sizeof(patch_t); ++i) {
-	  uint16_t pos = trace[i] >> 2; // convert back to MBHP_MF_NG resolution
-	  *(response_ptr++) = pos & 0x7f;
-	  *(response_ptr++) = pos >> 7;
-	}
+        for(i=0; i<sizeof(patch_t); ++i) {
+          uint16_t pos = trace[i] >> 2; // convert back to MBHP_MF_NG resolution
+          *(response_ptr++) = pos & 0x7f;
+          *(response_ptr++) = pos >> 7;
+        }
 	
-	sysex_send_dump(response, response_len, -1);
+        midi_send_sysex_dump(midi_port_for_traces, sysex_device_id, response, response_len, -1);
       }
     }
   }
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Handling the Console in an independent task
+////////////////////////////////////////////////////////////////////////////////////////////////////
+static void console_task(void *pvParameters)
+{
+  console_init();
+
+  while( 1 ) {
+    console_tick();
+  }
+}
+
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -694,12 +683,25 @@ static void task_mf(void *pvParameters)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 void app_main()
 {
-  // install BLE MIDI service
-  int status = blemidi_init(callback_midi_message_received);
-  if( status < 0 ) {
-    ESP_LOGE(BLEMIDI_TAG, "BLE MIDI Driver returned status=%d", status);
-  } else {
-    ESP_LOGI(BLEMIDI_TAG, "BLE MIDI Driver initialized successfully");
-    xTaskCreate(task_mf, "task_mf", 4096, NULL, 8, NULL);    
+  /* Initialize NVS — it is used to store PHY calibration data */
+  esp_err_t ret = nvs_flash_init();
+  if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    ESP_ERROR_CHECK(nvs_flash_erase());
+    ret = nvs_flash_init();
   }
+  ESP_ERROR_CHECK( ret );
+
+  // log levels
+  esp_log_level_set("gpio", ESP_LOG_WARN);
+  esp_log_level_set("MIDIbox", ESP_LOG_WARN); // can be changed with midibox_debug in console
+
+  // start with random seed
+  srand(esp_random());
+
+  // initialize MIDI interfaces
+  midi_init(callback_midi_message_received);
+
+  // launch tasks
+  xTaskCreate(console_task, "console", 4096, NULL, 5, NULL);
+  xTaskCreate(task_mf, "task_mf", 4096, NULL, 8, NULL);
 }

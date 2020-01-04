@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.5)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-set(EXTRA_COMPONENT_DIRS "./submodules/esp32-idf-blemidi/components/blemidi")
+set(EXTRA_COMPONENT_DIRS "./submodules/esp32-idf-blemidi/components/blemidi ./submodules/esp32-idf-applemidi/components/applemidi")
 
 project(mbhp_mf_ng)
 
