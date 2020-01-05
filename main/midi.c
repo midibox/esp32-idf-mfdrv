@@ -66,8 +66,6 @@ midi_if_t midi_if_get_type(uint8_t midi_port)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 static void blemidi_callback_midi_message_received(uint8_t blemidi_port, uint16_t timestamp, uint8_t midi_status, uint8_t *remaining_message, size_t len, size_t continued_sysex_pos)
 {
-  static uint8_t expect_continued_sysex = 0;
-
   ESP_LOGI(TAG, "CALLBACK blemidi_port=%d, timestamp=%d, midi_status=0x%02x, len=%d, continued_sysex_pos=%d, remaining_message:", blemidi_port, timestamp, midi_status, len, continued_sysex_pos);
   esp_log_buffer_hex(TAG, remaining_message, len);
 
@@ -139,16 +137,15 @@ int32_t midi_init(void *_callback_midi_message_received)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 int32_t midi_send_event1(uint8_t midi_port, uint8_t evnt0)
 {
+  uint8_t message[1] = {evnt0};
+
   switch( midi_if_get_type(midi_port) ) {
 
   case MIDI_IF_BLE: {
-    // TODO: unify API
-    uint8_t packet[3] = {blemidi_timestamp_high(), blemidi_timestamp_low(), evnt0};
-    blemidi_send_packet(midi_if_get_port(midi_port), packet, sizeof(packet));
+    blemidi_send_message(midi_if_get_port(midi_port), message, sizeof(message));
   } break;
 
   case MIDI_IF_APPLE: {
-    uint8_t message[3] = {evnt0};
     applemidi_send_message(midi_if_get_port(midi_port), message, sizeof(message));
   } break;
 
@@ -161,15 +158,14 @@ int32_t midi_send_event1(uint8_t midi_port, uint8_t evnt0)
 
 int32_t midi_send_event2(uint8_t midi_port, uint8_t evnt0, uint8_t evnt1)
 {
+  uint8_t message[2] = {evnt0, evnt1};
+
   switch( midi_if_get_type(midi_port) ) {
   case MIDI_IF_BLE: {
-    // TODO: unify API
-    uint8_t packet[4] = {blemidi_timestamp_high(), blemidi_timestamp_low(), evnt0, evnt1};
-    blemidi_send_packet(midi_if_get_port(midi_port), packet, sizeof(packet));
+    blemidi_send_message(midi_if_get_port(midi_port), message, sizeof(message));
   } break;
 
   case MIDI_IF_APPLE: {
-    uint8_t message[2] = {evnt0, evnt1};
     applemidi_send_message(midi_if_get_port(midi_port), message, sizeof(message));
   } break;
 
@@ -182,15 +178,14 @@ int32_t midi_send_event2(uint8_t midi_port, uint8_t evnt0, uint8_t evnt1)
 
 int32_t midi_send_event3(uint8_t midi_port, uint8_t evnt0, uint8_t evnt1, uint8_t evnt2)
 {
+  uint8_t message[3] = {evnt0, evnt1, evnt2 };
+
   switch( midi_if_get_type(midi_port) ) {
   case MIDI_IF_BLE: {
-    // TODO: unify API
-    uint8_t packet[5] = {blemidi_timestamp_high(), blemidi_timestamp_low(), evnt0, evnt1, evnt2 };
-    blemidi_send_packet(midi_if_get_port(midi_port), packet, sizeof(packet));
+    blemidi_send_message(midi_if_get_port(midi_port), message, sizeof(message));
   } break;
 
   case MIDI_IF_APPLE: {
-    uint8_t message[3] = {evnt0, evnt1, evnt2 };
     applemidi_send_message(midi_if_get_port(midi_port), message, sizeof(message));
   } break;
 
@@ -206,32 +201,21 @@ int32_t midi_send_event3(uint8_t midi_port, uint8_t evnt0, uint8_t evnt1, uint8_
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 int32_t midi_send_sysex_dump(uint8_t midi_port, uint8_t sysex_device_id, uint8_t *response, size_t response_len, int checksum_start)
 {
-  uint8_t is_blemidi = midi_if_get_type(midi_port) == MIDI_IF_BLE;
+  uint8_t is_applemidi = midi_if_get_type(midi_port) == MIDI_IF_APPLE;
+  size_t message_len = 6 + response_len; // includes MIDI status and remaining bytes
 
-  size_t packet_len = 6 + response_len + 1; // includes MIDI status and remaining bytes
-  if( is_blemidi ) {
-    packet_len += 3; // include timestamps
-  }
   if( checksum_start >= 0 )
-    packet_len += 1; // + checksum
+    message_len += 1; // + checksum
 
-  uint8_t *packet = (uint8_t *)malloc(packet_len * sizeof(uint8_t));
+  uint8_t *message = (uint8_t *)malloc(message_len * sizeof(uint8_t) + 1); // +1 for potential applemidi packet (see MIDI_IF_APPLE)
   size_t pos = 0;
-  if( is_blemidi ) {
-    packet[pos++] = blemidi_timestamp_high(); // TODO: find solution to avoid this special treatment
-    packet[pos++] = blemidi_timestamp_low();
-  }
-  packet[pos++] = 0xf0;
-  packet[pos++] = 0x00;
-  packet[pos++] = 0x00;
-  packet[pos++] = 0x7e;
-  packet[pos++] = 0x4f; // MBHP_MF_NG
-  packet[pos++] = sysex_device_id;
-  memcpy(&packet[pos], response, response_len);
-  if( is_blemidi ) {
-    packet[packet_len-2] = blemidi_timestamp_high();
-  }
-  packet[packet_len-1] = 0xf7;
+  message[pos++] = 0xf0;
+  message[pos++] = 0x00;
+  message[pos++] = 0x00;
+  message[pos++] = 0x7e;
+  message[pos++] = 0x4f; // MBHP_MF_NG
+  message[pos++] = sysex_device_id;
+  memcpy(&message[pos], response, response_len);
 
   if( checksum_start >= 0 ) {
     int i;
@@ -240,24 +224,31 @@ int32_t midi_send_sysex_dump(uint8_t midi_port, uint8_t sysex_device_id, uint8_t
     for(i=checksum_start; i<response_len-1; ++i) {
       checksum += response[i];
     }
-    packet[is_blemidi ? (packet_len-3) : (packet_len-2)] = (0x80 - checksum) & 0x7f;
+    message[message_len-1] = (0x80 - checksum) & 0x7f;
   }
 
   switch( midi_if_get_type(midi_port) ) {
   case MIDI_IF_BLE: {
-    // TODO: unify API
-    blemidi_send_packet(midi_if_get_port(midi_port), packet, packet_len);
+    blemidi_send_message(midi_if_get_port(midi_port), message, message_len);
+
+    uint8_t f7 = 0xf7;
+    blemidi_send_message(midi_if_get_port(midi_port), &f7, 1);
   } break;
 
   case MIDI_IF_APPLE: {
-    applemidi_send_message(midi_if_get_port(midi_port), packet, packet_len);
+    if( is_applemidi ) {
+      message_len += 1; // 0xf7 has to be part of the message, otherwise we can't comply to Apple MIDI protocol
+      message[message_len-1] = 0xf7;
+    }
+
+    applemidi_send_message(midi_if_get_port(midi_port), message, message_len);
   } break;
 
   default: {
   }
   }
 
-  free(packet);
+  free(message);
 
   return 0; // no error
 }
