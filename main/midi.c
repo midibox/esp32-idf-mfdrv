@@ -34,6 +34,7 @@
 
 #include "midi.h"
 #include "wifi.h"
+#include "uartmidi.h"
 #include "blemidi.h"
 #include "applemidi.h"
 #include "if/lwip/applemidi_if.h"
@@ -62,6 +63,19 @@ midi_if_t midi_if_get_type(uint8_t midi_port)
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+// This function is called from the UART MIDI Driver whenever a new MIDI message has been received
+////////////////////////////////////////////////////////////////////////////////////////////////////
+static void uartmidi_callback_midi_message_received(uint8_t uartmidi_port, uint8_t midi_status, uint8_t *remaining_message, size_t len, size_t continued_sysex_pos)
+{
+  ESP_LOGI(TAG, "receive_packet CALLBACK uartmidi_port=%d, midi_status=0x%02x, len=%d, continued_sysex_pos=%d, remaining_message:", uartmidi_port, midi_status, len, continued_sysex_pos);
+  esp_log_buffer_hex(TAG, remaining_message, len);
+
+  if( callback_midi_message_received ) {
+    callback_midi_message_received(midi_if_encode_port(MIDI_IF_UART, uartmidi_port), 0, midi_status, remaining_message, len, continued_sysex_pos);
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 // This callback is called whenever a new BLE MIDI message is received
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 static void blemidi_callback_midi_message_received(uint8_t blemidi_port, uint16_t timestamp, uint8_t midi_status, uint8_t *remaining_message, size_t len, size_t continued_sysex_pos)
@@ -79,11 +93,9 @@ static void blemidi_callback_midi_message_received(uint8_t blemidi_port, uint16_
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 static void applemidi_callback_midi_message_received(uint8_t applemidi_port, uint32_t timestamp, uint8_t midi_status, uint8_t *remaining_message, size_t len, size_t continued_sysex_pos)
 {
-  if( applemidi_get_debug_level() >= 3 ) {
-    // Note: with these messages enabled, we potentially get packet loss!
-    ESP_LOGI(TAG, "receive_packet CALLBACK applemidi_port=%d, timestamp=%d, midi_status=0x%02x, len=%d, continued_sysex_pos=%d, remaining_message:", applemidi_port, timestamp, midi_status, len, continued_sysex_pos);
-    esp_log_buffer_hex(TAG, remaining_message, len);
-  }
+  // Note: with these messages enabled, we potentially get packet loss!
+  ESP_LOGI(TAG, "receive_packet CALLBACK applemidi_port=%d, timestamp=%d, midi_status=0x%02x, len=%d, continued_sysex_pos=%d, remaining_message:", applemidi_port, timestamp, midi_status, len, continued_sysex_pos);
+  esp_log_buffer_hex(TAG, remaining_message, len);
 
   if( callback_midi_message_received ) {
     callback_midi_message_received(midi_if_encode_port(MIDI_IF_APPLE, applemidi_port), timestamp, midi_status, remaining_message, len, continued_sysex_pos);
@@ -128,7 +140,25 @@ int32_t midi_init(void *_callback_midi_message_received)
 
   blemidi_init(blemidi_callback_midi_message_received);
 
+  uartmidi_init(uartmidi_callback_midi_message_received);
+#if 0
+  // will conflict with console - have to found a solution to switch between MIDI and Console mode...
+  uartmidi_enable_port(1, 31250);
+#endif
+
   return 0; // no error
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Update Timestamps and handle output buffers
+// Should be periodically called from an application task
+////////////////////////////////////////////////////////////////////////////////////////////////////
+int32_t midi_tick(void)
+{
+  uartmidi_tick();
+  blemidi_tick();
+
+  return 0;
 }
 
 
@@ -140,6 +170,10 @@ int32_t midi_send_event1(uint8_t midi_port, uint8_t evnt0)
   uint8_t message[1] = {evnt0};
 
   switch( midi_if_get_type(midi_port) ) {
+
+  case MIDI_IF_UART: {
+    uartmidi_send_message(midi_if_get_port(midi_port), message, sizeof(message));
+  } break;
 
   case MIDI_IF_BLE: {
     blemidi_send_message(midi_if_get_port(midi_port), message, sizeof(message));
@@ -161,6 +195,11 @@ int32_t midi_send_event2(uint8_t midi_port, uint8_t evnt0, uint8_t evnt1)
   uint8_t message[2] = {evnt0, evnt1};
 
   switch( midi_if_get_type(midi_port) ) {
+
+  case MIDI_IF_UART: {
+    uartmidi_send_message(midi_if_get_port(midi_port), message, sizeof(message));
+  } break;
+
   case MIDI_IF_BLE: {
     blemidi_send_message(midi_if_get_port(midi_port), message, sizeof(message));
   } break;
@@ -181,6 +220,11 @@ int32_t midi_send_event3(uint8_t midi_port, uint8_t evnt0, uint8_t evnt1, uint8_
   uint8_t message[3] = {evnt0, evnt1, evnt2 };
 
   switch( midi_if_get_type(midi_port) ) {
+
+  case MIDI_IF_UART: {
+    uartmidi_send_message(midi_if_get_port(midi_port), message, sizeof(message));
+  } break;
+
   case MIDI_IF_BLE: {
     blemidi_send_message(midi_if_get_port(midi_port), message, sizeof(message));
   } break;
@@ -228,6 +272,14 @@ int32_t midi_send_sysex_dump(uint8_t midi_port, uint8_t sysex_device_id, uint8_t
   }
 
   switch( midi_if_get_type(midi_port) ) {
+
+  case MIDI_IF_UART: {
+    uartmidi_send_message(midi_if_get_port(midi_port), message, message_len);
+
+    uint8_t f7 = 0xf7;
+    uartmidi_send_message(midi_if_get_port(midi_port), &f7, 1);
+  } break;
+
   case MIDI_IF_BLE: {
     blemidi_send_message(midi_if_get_port(midi_port), message, message_len);
 

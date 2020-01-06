@@ -43,14 +43,9 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 
-#include "wifi.h"
 #include "console.h"
 #include "midi.h"
 
-#include "applemidi.h"
-#include "if/lwip/applemidi_if.h"
-
-#include "blemidi.h"
 #include "mfdrv.h"
 
 
@@ -216,31 +211,50 @@ static int32_t sysex_patch_write(uint8_t address, uint8_t value)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 static void callback_midi_message_received(uint8_t midi_port, uint16_t timestamp, uint8_t midi_status, uint8_t *remaining_message, size_t len, size_t continued_sysex_pos)
 {
-  static uint8_t expect_continued_sysex = 0;
-  
   ESP_LOGI(TAG, "CALLBACK midi_port=0x%02x, timestamp=%d, midi_status=0x%02x, len=%d, continued_sysex_pos=%d, remaining_message:", midi_port, timestamp, midi_status, len, continued_sysex_pos);
   esp_log_buffer_hex(TAG, remaining_message, len);
 
   // SysEx communication
-  uint8_t *sysex_stream = remaining_message;
-  if( midi_status == 0xf0 &&
-      (continued_sysex_pos ||
-       (len >= 6 &&
-           *(sysex_stream++) == 0x00 &&
-           *(sysex_stream++) == 0x00 &&
-           *(sysex_stream++) == 0x7e &&
-           *(sysex_stream++) == 0x4f && // MBHP_MF_NG
-           *(sysex_stream++) == sysex_device_id))
-      ) {
+  // Note: parser has to consider that incoming SysEx stream could be received piece-wise
+  static uint8_t sysex_buffer[600]; // this big SysEx buffer enormously simplifies parsing of incoming SysEx data chunks!
+  static size_t sysex_buffer_len = 0;
+  static uint8_t sysex_buffer_port = 0xff; // TODO: currently we interrupt if SysEx is received from another port in parallel - could be improved; e.g. header matching: only listen to that port until f7
 
-    if( continued_sysex_pos && !expect_continued_sysex ) {
-      return; // seems that this was continued sysex data for something else...
+  if( midi_status == 0xf0 ) {
+    if( sysex_buffer_port != 0xff && midi_port != sysex_buffer_port )
+      return; // ignore - TODO: timeout!
+    sysex_buffer_port = midi_port; // got it
+
+    size_t copy_len = len;
+    if( (continued_sysex_pos + copy_len) > sizeof(sysex_buffer) ) {
+      copy_len = (continued_sysex_pos > sizeof(sysex_buffer)) ? 0 : sizeof(sysex_buffer) - continued_sysex_pos;
     }
-    expect_continued_sysex = 0; // has to be set explicitely again if required
-    
-    uint8_t cmd = continued_sysex_pos ? 0x2 : *(sysex_stream++);
-    switch( cmd ) {
+    memcpy(&sysex_buffer[continued_sysex_pos], remaining_message, copy_len);
+
+    if( continued_sysex_pos == 0 ) {
+      sysex_buffer_len = copy_len;
+    } else {
+      sysex_buffer_len += copy_len;
+    }
+  } else if( midi_status == 0xf7 ) {
+    if( midi_port != sysex_buffer_port )
+      return; // ignore - TODO: timeout!
+    sysex_buffer_port = 0xff; // message has been handled, allow other MIDI ports to fill the buffer
+
+    uint8_t header[5] = { 0x00, 0x00, 0x7e, 0x4f, sysex_device_id };
+    if( sysex_buffer_len < sizeof(header) || memcmp(header, sysex_buffer, sizeof(header)) != 0 ) {
+      return; // header not matching
+    }
+
+    uint8_t *sysex_stream = &sysex_buffer[sizeof(header)];
+    switch( *(sysex_stream++) ) {
     case 0x1: { // Patch Read
+      if( sysex_buffer_len < (sizeof(header) + 1 + 1) ) {
+        uint8_t response[2] = {0xe, 0x00};
+        midi_send_sysex_dump(midi_port, sysex_device_id, response, 2, -1); // Error Response
+        return;
+      }
+
       int i;
       uint8_t patch_number = *(sysex_stream++); // TODO: handle patch number
 
@@ -260,7 +274,12 @@ static void callback_midi_message_received(uint8_t midi_port, uint16_t timestamp
     } break;
 	
     case 0x2: { // Patch Write
-      // this is the only command which could be continued over multiple packets!
+      if( sysex_buffer_len < (sizeof(header) + 1 + 512 + 1) ) {
+        uint8_t response[2] = {0xe, 0x00};
+        midi_send_sysex_dump(midi_port, sysex_device_id, response, 2, -1); // Error Response
+        return;
+      }
+
       static uint8_t patch_number = 0;
       static uint8_t checksum = 0x00;
 
@@ -286,11 +305,6 @@ static void callback_midi_message_received(uint8_t midi_port, uint16_t timestamp
         }
 	
         checksum += *(checksum_scan_ptr++);
-
-        if( checksum_scan_ptr == (remaining_message+len) ) {
-          expect_continued_sysex = 1;
-          return; // expecting additional packets
-        }
       }
       uint8_t expected_checksum = (0x80 - checksum) & 0x7f;
 
@@ -307,10 +321,16 @@ static void callback_midi_message_received(uint8_t midi_port, uint16_t timestamp
     } break;
 	
     case 0x6: { // Parameter Write
+      if( sysex_buffer_len < (sizeof(header) + 1 + 2 + 2) ) {
+        uint8_t response[2] = {0xe, 0x00};
+        midi_send_sysex_dump(midi_port, sysex_device_id, response, 2, -1); // Error Response
+        return;
+      }
+
       uint32_t address = (*(sysex_stream++) & 0x01) << 7;
       address |= (*(sysex_stream++) & 0x7f);
 
-      int num_bytes = (len-7) / 2;
+      int num_bytes = (sysex_buffer_len-7) / 2;
       int i;
       for(i=0; i<num_bytes; ++i, ++address) {
         uint8_t data = (*(sysex_stream++) & 0x0f);
@@ -329,6 +349,12 @@ static void callback_midi_message_received(uint8_t midi_port, uint16_t timestamp
     } break;
 	
     case 0x9: { // Faders Get
+      if( sysex_buffer_len < (sizeof(header) + 1) ) {
+        uint8_t response[2] = {0xe, 0x00};
+        midi_send_sysex_dump(midi_port, sysex_device_id, response, 2, -1); // Error Response
+        return;
+      }
+
       uint8_t first_fader = *(sysex_stream++);
 
       {
@@ -349,10 +375,15 @@ static void callback_midi_message_received(uint8_t midi_port, uint16_t timestamp
     } break;
 	
     case 0xa: { // Faders Set
+      if( sysex_buffer_len < (sizeof(header) + 1 + 2) ) {
+        uint8_t response[2] = {0xe, 0x00};
+        midi_send_sysex_dump(midi_port, sysex_device_id, response, 2, -1); // Error Response
+        return;
+      }
       uint8_t first_fader = *(sysex_stream++);
 
       int i;
-      int num_faders = (len-7) / 2;
+      int num_faders = (sysex_buffer_len-7) / 2;
       for(i=0; i<num_faders; ++i) {
         uint16_t pos = *(sysex_stream++);
         pos |= ((uint16_t)*(sysex_stream++)) << 7;
@@ -369,6 +400,12 @@ static void callback_midi_message_received(uint8_t midi_port, uint16_t timestamp
     } break;
 	
     case 0xb: { // Trace Request
+      if( sysex_buffer_len < (sizeof(header) + 1) ) {
+        uint8_t response[2] = {0xe, 0x00};
+        midi_send_sysex_dump(midi_port, sysex_device_id, response, 2, -1); // Error Response
+        return;
+      }
+
       uint8_t mf = *(sysex_stream++);
       uint8_t scale = *(sysex_stream++);
       midi_port_for_traces = midi_port;
@@ -377,7 +414,7 @@ static void callback_midi_message_received(uint8_t midi_port, uint16_t timestamp
 	
     case 0xf: { // Ping
       // feedback detection: only send back if no additional byte has been received!
-      if( len == 6 ) {
+      if( sysex_buffer_len == 6 ) {
         uint8_t response[2] = {0xf, 0x00};
         midi_send_sysex_dump(midi_port, sysex_device_id, response, 2, -1); // Pong
       }
@@ -578,9 +615,9 @@ static void task_mf(void *pvParameters)
     int i;
 
     ////////////////////////////////////////////////////////////////////////////////////////////////
-    // increase BLE MIDI Timestamp
+    // increase MIDI Timestamps
     ////////////////////////////////////////////////////////////////////////////////////////////////
-    blemidi_tick();
+    midi_tick();
 
 
     ////////////////////////////////////////////////////////////////////////////////////////////////

@@ -4,3 +4,6 @@
 [submodule "submodules/esp32-idf-applemidi"]
 	path = submodules/esp32-idf-applemidi
 	url = https://github.com/midibox/esp32-idf-applemidi
+[submodule "submodules/esp32-idf-uartmidi"]
+	path = submodules/esp32-idf-uartmidi
+	url = https://github.com/midibox/esp32-idf-uartmidi

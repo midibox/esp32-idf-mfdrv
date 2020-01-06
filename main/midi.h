@@ -48,6 +48,7 @@ extern midi_if_t midi_if_get_type(uint8_t midi_port);
 extern uint8_t midi_if_get_port(uint8_t midi_port);
 
 extern int32_t midi_init(void *callback_midi_message_received);
+extern int32_t midi_tick(void);
 
 extern int32_t midi_send_event1(uint8_t midi_port, uint8_t evnt0);
 extern int32_t midi_send_event2(uint8_t midi_port, uint8_t evnt0, uint8_t evnt1);
