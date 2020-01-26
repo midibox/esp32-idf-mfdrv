@@ -45,6 +45,7 @@
 #include "applemidi.h"
 #include "if/lwip/applemidi_if.h"
 #include "blemidi.h"
+#include "uartmidi.h"
 
 
 static void register_console_commands(void);
@@ -117,6 +118,9 @@ int32_t console_init(void)
 #endif
 #if BLEMIDI_ENABLE_CONSOLE
   blemidi_register_console_commands();
+#endif
+#if UARTMIDI_ENABLE_CONSOLE
+  uartmidi_register_console_commands();
 #endif
   register_console_commands();
 

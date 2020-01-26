@@ -45,6 +45,7 @@
 
 #include "console.h"
 #include "midi.h"
+#include "uartmidi.h"
 
 #include "mfdrv.h"
 
@@ -460,6 +461,7 @@ static void callback_manual_fader_change(uint32_t mf, uint16_t value)
     // 12bit -> 14bit value
     value <<= 2;
 
+    midi_send_event3(midi_if_encode_port(MIDI_IF_UART, 2), 0xe0 + mf, value & 0x7f, value >> 7);
     midi_send_event3(midi_if_encode_port(MIDI_IF_BLE, 0), 0xe0 + mf, value & 0x7f, value >> 7);
     midi_send_event3(midi_if_encode_port(MIDI_IF_APPLE, 1), 0xe0 + mf, value & 0x7f, value >> 7);
   }
@@ -476,6 +478,7 @@ static void callback_touch_sensor_change(uint32_t ts, uint8_t value)
 
   if( patch.touch_sensor_mode >= 1 ) { // touch sensor will generate a MIDI event
     // TODO: make MIDI event optional depending on patch.operation_mode    
+    midi_send_event3(midi_if_encode_port(MIDI_IF_UART, 2), 0x90, 0x68 + ts, value ? 0x00 : 0x7f);
     midi_send_event3(midi_if_encode_port(MIDI_IF_BLE, 0), 0x90, 0x68 + ts, value ? 0x00 : 0x7f);
     midi_send_event3(midi_if_encode_port(MIDI_IF_APPLE, 1), 0x90, 0x68 + ts, value ? 0x00 : 0x7f);
   }
@@ -564,11 +567,16 @@ static void task_mf(void *pvParameters)
 
     int i;
     for(i=0; i<8; ++i) {
+#if 0      
+      uint8_t chn = i;
+#else
+      uint8_t chn = 7-i; // to simplify layout the channel order has been mirrored
+#endif      
       // retrieve conversion values
       // shift in start bit + SGL + MSB of channel selection, shift out dummy byte
-      adc_send_buffer[i][0] = 0x6 | (i >> 2);
+      adc_send_buffer[i][0] = 0x6 | (chn >> 2);
       // shift in remaining 2 bits of channel selection, shift out MSBs of conversion value
-      adc_send_buffer[i][1] = i << 6;
+      adc_send_buffer[i][1] = chn << 6;
       // shift in dummy, shift out LSBs of conversion value
       adc_send_buffer[i][2] = 0x00;
 
@@ -739,6 +747,9 @@ void app_main()
   midi_init(callback_midi_message_received);
 
   // launch tasks
-  xTaskCreate(console_task, "console", 4096, NULL, 5, NULL);
+  if( uartmidi_get_enabled(2) == 0 ) {
+    xTaskCreate(console_task, "console", 4096, NULL, 5, NULL);
+  }
+
   xTaskCreate(task_mf, "task_mf", 4096, NULL, 8, NULL);
 }
